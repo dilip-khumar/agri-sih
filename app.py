@@ -1,83 +1,94 @@
-# app.py
 import os
-from io import BytesIO
+import requests
 from flask import Flask, request, jsonify
 from PIL import Image
 import numpy as np
-import requests
-
-# Try tflite_runtime first, fallback to tensorflow
-try:
-    import tflite_runtime.interpreter as tflite
-    Interpreter = tflite.Interpreter
-except Exception:
-    import tensorflow as tf
-    Interpreter = tf.lite.Interpreter
-
-MODEL_PATH = "tomato_best.tflite"   # put your model here
-CLASS_NAMES = [
-    "Tomato_Healthy",
-    "Tomato_Late_blight",
-    "Tomato_Leaf_Mold",
-    "Tomato_Bacterial_spot"
-    # edit to EXACT order used during training
-]
-
-# Telegram (fill via Render environment variables)
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID   = os.environ.get("CHAT_ID")
-
-# Load tflite
-interpreter = Interpreter(model_path=MODEL_PATH)
-interpreter.allocate_tensors()
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
-
-def preprocess(img, size=(224,224)):
-    img = img.convert("RGB").resize(size)
-    arr = np.array(img).astype(np.float32) / 255.0
-    return np.expand_dims(arr, axis=0)
-
-def run_inference(pil_image):
-    x = preprocess(pil_image)
-    interpreter.set_tensor(input_details[0]['index'], x)
-    interpreter.invoke()
-    preds = interpreter.get_tensor(output_details[0]['index'])[0]
-    idx = int(np.argmax(preds))
-    conf = float(np.max(preds)) * 100.0
-    label = CLASS_NAMES[idx] if idx < len(CLASS_NAMES) else f"Class_{idx}"
-    return label, conf, preds.tolist()
-
-def send_to_telegram(image_bytes, caption):
-    if not BOT_TOKEN or not CHAT_ID:
-        return None
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    files = {"photo": ("leaf.jpg", image_bytes, "image/jpeg")}
-    data = {"chat_id": CHAT_ID, "caption": caption}
-    resp = requests.post(url, data=data, files=files, timeout=30)
-    return resp
+import tensorflow as tf
 
 app = Flask(__name__)
 
-@app.route("/", methods=["GET"])
+# Load environment variables from Render
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
+
+# Path to your TFLite model (make sure you included it in repo)
+MODEL_PATH = "tomato_best.tflite"
+
+# Load TFLite model
+interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+interpreter.allocate_tensors()
+
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# Define your class names (same as training dataset order)
+class_names = [
+    "Tomato_Bacterial_spot",
+    "Tomato_Early_blight",
+    "Tomato_Late_blight",
+    "Tomato_Leaf_Mold",
+    "Tomato_Septoria_leaf_spot",
+    "Tomato_Spider_mites",
+    "Tomato_Target_Spot",
+    "Tomato_YellowLeaf__Curl_Virus",
+    "Tomato_mosaic_virus",
+    "Tomato_healthy"
+]
+
+
+def preprocess_image(image_file):
+    """Preprocess uploaded image for TFLite model"""
+    image = Image.open(image_file).convert("RGB")
+    image = image.resize((224, 224))  # match training size
+    img_array = np.array(image, dtype=np.float32) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
+    return img_array, image
+
+
+@app.route("/")
 def home():
     return "Tomato API running 🚀"
 
+
 @app.route("/predict", methods=["POST"])
 def predict():
-    # accept form field 'image' (multipart/form-data)
-    if 'image' not in request.files:
-        return jsonify({"ok": False, "error": "No image provided"}), 400
-    f = request.files['image']
-    try:
-        img = Image.open(BytesIO(f.read())).convert("RGB")
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"Invalid image: {e}"}), 400
+    if "image" not in request.files:
+        return jsonify({"ok": False, "error": "No image uploaded"}), 400
 
-    label, conf, preds = run_inference(img)
-    caption = f"Disease: {label} ({conf:.2f}%)"
+    file = request.files["image"]
+    img_array, pil_img = preprocess_image(file)
 
-    # send to Telegram (async not necessary for beginner)
-    send_resp = send_to_telegram(f.stream.read(), caption) if (BOT_TOKEN and CHAT_ID) else None
+    # Run inference
+    interpreter.set_tensor(input_details[0]["index"], img_array)
+    interpreter.invoke()
+    preds = interpreter.get_tensor(output_details[0]["index"])
 
-    return jsonify({"ok": True, "label": label, "confidence": conf, "telegram": (send_resp.status_code if send_resp else None)})
+    pred_index = int(np.argmax(preds))
+    label = class_names[pred_index]
+    confidence = float(np.max(preds) * 100)
+
+    # Save image temporarily to send to Telegram
+    temp_path = "uploaded.jpg"
+    pil_img.save(temp_path)
+
+    telegram_status = None
+    if BOT_TOKEN and CHAT_ID:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+        files = {"photo": open(temp_path, "rb")}
+        data = {"chat_id": CHAT_ID, "caption": f"Disease: {label} ({confidence:.2f}%)"}
+        try:
+            requests.post(url, files=files, data=data, timeout=30)
+            telegram_status = "sent"
+        except Exception as e:
+            telegram_status = f"error: {e}"
+
+    return jsonify({
+        "ok": True,
+        "label": label,
+        "confidence": confidence,
+        "telegram": telegram_status
+    })
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
