@@ -7,7 +7,7 @@ import os
 import requests
 
 # =============================
-# Telegram Config (from Render environment variables)
+# Telegram Config
 # =============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -15,14 +15,21 @@ CHAT_ID = os.getenv("CHAT_ID")
 app = Flask(__name__)
 
 # =============================
-# Load TFLite model
+# Load TFLite model safely
 # =============================
-MODEL_PATH = "tomato_model.tflite"   # make sure this file is in your repo
-interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
-interpreter.allocate_tensors()
+MODEL_PATH = "tomato_model.tflite"
 
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
+if os.path.exists(MODEL_PATH):
+    interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+    interpreter.allocate_tensors()
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    MODEL_READY = True
+else:
+    interpreter = None
+    input_details = None
+    output_details = None
+    MODEL_READY = False
 
 # =============================
 # Class names
@@ -54,11 +61,17 @@ def preprocess(img: Image.Image):
 # =============================
 @app.route("/")
 def home():
-    return "Tomato Disease API running ✅"
+    if MODEL_READY:
+        return "✅ Tomato Disease API running with model loaded"
+    else:
+        return "⚠️ API running, but model file not found. Upload tomato_model.tflite"
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    # ✅ Handle file upload from App Inventor / curl
+    if not MODEL_READY:
+        return jsonify({"ok": False, "error": "Model file not found on server"}), 500
+
+    # ✅ Handle file upload
     if not request.files:
         return jsonify({"ok": False, "error": "No file uploaded"}), 400
 
@@ -67,7 +80,7 @@ def predict():
 
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        # 🔽 Resize big photos to avoid 413 errors
+        # 🔽 Resize to avoid 413 errors
         img.thumbnail((512, 512))
     except Exception as e:
         return jsonify({"ok": False, "error": f"Invalid image: {e}"}), 400
