@@ -17,7 +17,7 @@ app = Flask(__name__)
 # =============================
 # Load TFLite model safely
 # =============================
-MODEL_PATH = "tomato_model.tflite"
+MODEL_PATH = "tomato_best.tflite"
 
 if os.path.exists(MODEL_PATH):
     interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
@@ -122,3 +122,4 @@ def predict():
 # =============================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
